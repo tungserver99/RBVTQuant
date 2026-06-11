@@ -158,6 +158,7 @@ def quantize_model(
     max_length: int = 512,
     row_chunk: int = 1024,
     rbvt_lambda: float = 1.0,
+    rbvt_topk: int = 0,
     gap_floor: float = 1e-8,
     strict_descent: bool = True,
 ):
@@ -208,6 +209,7 @@ def quantize_model(
                 mu=mu,
                 sigma_ii=sigma_ii,
                 rbvt_lambda=rbvt_lambda,
+                rbvt_topk=rbvt_topk if rbvt_topk > 0 else None,
                 row_chunk=row_chunk,
                 gap_floor=gap_floor,
                 strict_descent=strict_descent,
@@ -254,6 +256,7 @@ def quantize_model(
                 "objective_before": total_objective_before,
                 "objective_after": total_objective_after,
                 "variance_increase": total_variance_increase,
+                "rbvt_topk": rbvt_topk,
             }
         )
 
@@ -334,6 +337,7 @@ def build_parser():
     p.add_argument("--asym", dest="asym", action="store_true", default=True)
     p.add_argument("--no-asym", dest="asym", action="store_false")
     p.add_argument("--rbvt-lambda", type=float, default=1.0, help="Lambda in the RBVT surrogate objective")
+    p.add_argument("--rbvt-topk", type=int, default=0, help="Optional per-row candidate prefilter for RBVT; 0 keeps the full candidate set")
     p.add_argument("--gap-floor", type=float, default=1e-8, help="Absolute floor on a feasible neighbouring gap")
     p.add_argument("--strict-descent", dest="strict_descent", action="store_true", default=True, help="Enforce sum r_i <= T in projection")
     p.add_argument("--allow-overshoot", dest="strict_descent", action="store_false", help="Use the looser sum r_i <= 2T projection bound")
@@ -432,6 +436,7 @@ def main():
         max_length=args.max_length,
         row_chunk=args.row_chunk,
         rbvt_lambda=args.rbvt_lambda,
+        rbvt_topk=args.rbvt_topk,
         gap_floor=args.gap_floor,
         strict_descent=args.strict_descent,
     )

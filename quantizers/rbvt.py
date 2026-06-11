@@ -49,6 +49,7 @@ def apply_rbvt(
     mu: torch.Tensor,
     sigma_ii: Optional[torch.Tensor] = None,
     rbvt_lambda: float = 1.0,
+    rbvt_topk: Optional[int] = None,
     row_chunk: int = 1024,
     gap_floor: float = 1e-8,
     relax_eps: float = 1e-12,
@@ -141,7 +142,13 @@ def apply_rbvt(
                 objective_after += base_obj
                 continue
 
-            cand_order = torch.argsort(rho[rr, cand], descending=False)
+            cand_rho = rho[rr, cand]
+            if rbvt_topk is not None and rbvt_topk > 0 and cand.numel() > rbvt_topk:
+                _, topk_idx = torch.topk(cand_rho, k=rbvt_topk, largest=False, sorted=False)
+                cand = cand[topk_idx]
+                cand_rho = cand_rho[topk_idx]
+
+            cand_order = torch.argsort(cand_rho, descending=False)
             cand = cand[cand_order]
 
             r_cand = r[rr, cand]
