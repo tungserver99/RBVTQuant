@@ -300,7 +300,7 @@ def build_parser():
     p.add_argument("--skip-lmhead", dest="skip_lmhead", action="store_true", default=True)
     p.add_argument("--no-skip-lmhead", dest="skip_lmhead", action="store_false")
     p.add_argument("--n-calib", type=int, default=128)
-    p.add_argument("--max-length", type=int, default=512, help="Calibration max token length")
+    p.add_argument("--max-length", type=int, default=2048, help="Calibration max token length")
     p.add_argument("--calib-dataset", type=str, default="c4", choices=["c4", "wikitext2"])
     p.add_argument("--seed", type=int, default=42)
 
