@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+MODELS=(
+  "meta-llama/Llama-3.1-8B"
+  "mistralai/Mistral-7B-v0.3"
+  "meta-llama/Meta-Llama-3-8B"
+  "Qwen/Qwen3.5-9B"
+)
+
+slugify() {
+  local s="$1"
+  s="${s//\//_}"
+  s="${s//./_}"
+  s="${s//-/_}"
+  echo "$s"
+}
+
+for model in "${MODELS[@]}"; do
+  model_slug="$(slugify "$model")"
+
+  python main.py \
+    --model-path "$model" \
+    --device cuda:0 \
+    --method rtn \
+    --quantizer nf4 \
+    --output-dir "./outputs/${model_slug}_rtn_nf4" \
+    --eval-float \
+    --calib-dataset c4 \
+    --max-length 2048 \
+    --eval-max-length 2048
+
+  python main.py \
+    --model-path "$model" \
+    --device cuda:0 \
+    --method rtn \
+    --quantizer nf3 \
+    --output-dir "./outputs/${model_slug}_rtn_nf3" \
+    --calib-dataset c4 \
+    --max-length 2048 \
+    --eval-max-length 2048
+done

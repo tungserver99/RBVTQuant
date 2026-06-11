@@ -14,6 +14,7 @@ import gc
 import json
 import os
 import random
+import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -53,6 +54,19 @@ def save_run_summary(output_dir: str, summary: dict):
     with open(summary_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, sort_keys=True)
     print(f"Saved run summary to {summary_path}")
+
+
+def cleanup_output_dir(output_dir: str, keep_files: tuple[str, ...] = ("run_summary.json",)):
+    out = Path(output_dir)
+    keep = set(keep_files)
+    for child in out.iterdir():
+        if child.name in keep:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    print(f"Removed model artifacts from {out}; kept {sorted(keep)}")
 
 
 class ActStatsCollector:
@@ -488,6 +502,7 @@ def main():
         "args": vars(args),
     }
     save_run_summary(args.output_dir, run_summary)
+    cleanup_output_dir(args.output_dir)
 
     print("Done.")
 

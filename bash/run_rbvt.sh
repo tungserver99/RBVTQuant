@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+MODELS=(
+  "meta-llama/Llama-3.1-8B"
+  "mistralai/Mistral-7B-v0.3"
+  "meta-llama/Meta-Llama-3-8B"
+  "Qwen/Qwen3.5-9B"
+)
+
+slugify() {
+  local s="$1"
+  s="${s//\//_}"
+  s="${s//./_}"
+  s="${s//-/_}"
+  echo "$s"
+}
+
+for model in "${MODELS[@]}"; do
+  model_slug="$(slugify "$model")"
+
+  python main.py \
+    --model-path "$model" \
+    --device cuda:1 \
+    --method rbvt \
+    --quantizer nf4 \
+    --output-dir "./outputs/${model_slug}_rbvt_nf4" \
+    --rbvt-lambda 1.0 \
+    --rbvt-topk 0 \
+    --calib-dataset c4 \
+    --max-length 2048 \
+    --eval-max-length 2048
+
+  python main.py \
+    --model-path "$model" \
+    --device cuda:1 \
+    --method rbvt \
+    --quantizer nf3 \
+    --output-dir "./outputs/${model_slug}_rbvt_nf3" \
+    --rbvt-lambda 1.0 \
+    --rbvt-topk 0 \
+    --calib-dataset c4 \
+    --max-length 2048 \
+    --eval-max-length 2048
+done
