@@ -96,15 +96,16 @@ def apply_rbvt(
         e_sign = torch.sign(e)
         b = e @ mu
 
-        blk = col_block.view(1, in_features, 1).expand(rc, in_features, L)
-        levels_per_w = torch.gather(levels, 1, blk)
-
-        cur = torch.gather(levels_per_w, 2, idx.unsqueeze(-1)).squeeze(-1)
         left_idx = (idx - 1).clamp(min=0)
         right_idx = (idx + 1).clamp(max=L - 1)
-        left = torch.gather(levels_per_w, 2, left_idx.unsqueeze(-1)).squeeze(-1)
-        right = torch.gather(levels_per_w, 2, right_idx.unsqueeze(-1)).squeeze(-1)
-        del levels_per_w, blk
+        row_ids = torch.arange(rc, device=device).unsqueeze(1)
+        blk_ids = col_block.unsqueeze(0).expand(rc, in_features)
+
+        # Read only the realised current / neighbouring levels that RBVT needs,
+        # instead of materialising the full [rows, in_features, L] table.
+        cur = levels[row_ids, blk_ids, idx]
+        left = levels[row_ids, blk_ids, left_idx]
+        right = levels[row_ids, blk_ids, right_idx]
 
         g_left = (cur - left).abs()
         g_right = (right - cur).abs()
@@ -121,8 +122,6 @@ def apply_rbvt(
         sign_aligned = (b.unsqueeze(1) * v) > 0
         admissible = feasible & gap_ok & sign_aligned & (r > relax_eps)
         rho = q / (r + relax_eps)
-        rho = torch.where(admissible, rho, torch.full_like(rho, float("inf")))
-        order = torch.argsort(rho, dim=1, descending=False)
 
         for rr in range(rc):
             T = float(abs(b[rr].item()))
@@ -135,13 +134,15 @@ def apply_rbvt(
                 objective_after += base_obj
                 continue
 
-            ordered = order[rr]
-            cand = ordered[torch.isfinite(rho[rr, ordered])]
+            cand = torch.nonzero(admissible[rr], as_tuple=False).squeeze(1)
             total_candidates += int(cand.numel())
             if cand.numel() == 0:
                 bias_after += base_obj
                 objective_after += base_obj
                 continue
+
+            cand_order = torch.argsort(rho[rr, cand], descending=False)
+            cand = cand[cand_order]
 
             r_cand = r[rr, cand]
             q_cand = q[rr, cand]
