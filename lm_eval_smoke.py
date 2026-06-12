@@ -11,21 +11,25 @@ import argparse
 from datetime import datetime
 
 from lm_eval_runner import LMEvalHarnessRunner
+from runtime_utils import DEFAULT_LM_EVAL_TASKS
 
 
 def main():
     parser = argparse.ArgumentParser(description="RBVTQuant lm-eval smoke test")
     parser.add_argument("--model-path", type=str, default="sshleifer/tiny-gpt2")
     parser.add_argument("--device", type=str, default="cpu")
-    parser.add_argument("--task", type=str, default="piqa")
+    parser.add_argument("--task-preset", choices=sorted(DEFAULT_LM_EVAL_TASKS), default="extended")
+    parser.add_argument("--tasks", nargs="+", default=None)
     parser.add_argument("--limit", type=float, default=5)
     parser.add_argument("--batch-size", default="auto")
     parser.add_argument("--num-fewshot", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="./outputs/lm_eval_smoke")
     args = parser.parse_args()
 
+    tasks = list(args.tasks) if args.tasks else list(DEFAULT_LM_EVAL_TASKS[args.task_preset])
+
     runner = LMEvalHarnessRunner(
-        tasks=[args.task],
+        tasks=tasks,
         device=args.device,
         batch_size=args.batch_size,
         num_fewshot=args.num_fewshot,
