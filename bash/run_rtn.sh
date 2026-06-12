@@ -12,7 +12,7 @@ MODELS=(
   "meta-llama/Llama-3.1-8B"
   "mistralai/Mistral-7B-v0.3"
   "meta-llama/Meta-Llama-3-8B"
-  "Qwen/Qwen3.5-9B"
+  "Qwen/Qwen3-8B"
 )
 
 slugify() {
