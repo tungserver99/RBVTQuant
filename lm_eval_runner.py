@@ -126,11 +126,17 @@ class LMEvalHarnessRunner:
     def _patch_transformers_for_lm_eval(self):
         import transformers
 
-        if hasattr(transformers, "AutoModelForVision2Seq"):
+        existing = getattr(transformers, "AutoModelForVision2Seq", None)
+        if existing is not None:
             return
 
         fallback = None
-        for attr in ("AutoModelForImageTextToText", "AutoModelForVisionEncoderDecoder"):
+        for attr in (
+            "AutoModelForImageTextToText",
+            "AutoModelForVisionEncoderDecoder",
+            "AutoModelForSeq2SeqLM",
+            "AutoModelForCausalLM",
+        ):
             fallback = getattr(transformers, attr, None)
             if fallback is not None:
                 break
