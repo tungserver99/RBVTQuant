@@ -43,6 +43,8 @@ for model in "${MODELS[@]}"; do
     --calib-dataset c4 \
     --max-length 2048 \
     --eval-max-length 2048 \
+    --include-lm-eval \
+    --lm-eval-task-preset extended \
     "${WANDB_ARGS[@]}"
 
   python main.py \
@@ -54,5 +56,7 @@ for model in "${MODELS[@]}"; do
     --calib-dataset c4 \
     --max-length 2048 \
     --eval-max-length 2048 \
+    --include-lm-eval \
+    --lm-eval-task-preset extended \
     "${WANDB_ARGS[@]}"
 done

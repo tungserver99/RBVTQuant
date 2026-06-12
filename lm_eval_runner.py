@@ -71,8 +71,24 @@ class LMEvalHarnessRunner:
         with open(output_path, "w", encoding="utf-8") as handle:
             json.dump(self._make_json_safe(payload), handle, indent=2, sort_keys=True)
 
+    def _patch_transformers_for_lm_eval(self):
+        import transformers
+
+        if hasattr(transformers, "AutoModelForVision2Seq"):
+            return
+
+        fallback = None
+        for attr in ("AutoModelForImageTextToText", "AutoModelForVisionEncoderDecoder"):
+            fallback = getattr(transformers, attr, None)
+            if fallback is not None:
+                break
+
+        if fallback is not None:
+            setattr(transformers, "AutoModelForVision2Seq", fallback)
+
     def evaluate_model(self, model_name: str, model_path: str) -> dict:
         try:
+            self._patch_transformers_for_lm_eval()
             from lm_eval import evaluator
         except ImportError as exc:
             raise RuntimeError(
