@@ -73,6 +73,56 @@ class LMEvalHarnessRunner:
         with open(output_path, "w", encoding="utf-8") as handle:
             json.dump(self._make_json_safe(payload), handle, indent=2, sort_keys=True)
 
+    def _patch_datasets_repo_aliases(self):
+        try:
+            import datasets
+            import datasets.load as datasets_load
+        except ImportError:
+            return
+
+        aliases = {
+            "wikitext": "Salesforce/wikitext",
+            "ai2_arc": "allenai/ai2_arc",
+            "hellaswag": "Rowan/hellaswag",
+            "piqa": "ybisk/piqa",
+            "winogrande": "allenai/winogrande",
+            "openbookqa": "allenai/openbookqa",
+            "boolq": "google/boolq",
+            "glue": "nyu-mll/glue",
+            "super_glue": "aps/super_glue",
+            "lambada_openai": "EleutherAI/lambada_openai",
+        }
+
+        def normalize(value):
+            if isinstance(value, str):
+                return aliases.get(value, value)
+            return value
+
+        def patch_callable(module, name: str, key_names: tuple[str, ...]):
+            original = getattr(module, name, None)
+            if original is None or getattr(original, "_rbvt_patched", False):
+                return
+
+            def wrapper(*args, **kwargs):
+                new_args = list(args)
+                if new_args:
+                    new_args[0] = normalize(new_args[0])
+                for key in key_names:
+                    if key in kwargs:
+                        kwargs[key] = normalize(kwargs[key])
+                return original(*new_args, **kwargs)
+
+            wrapper._rbvt_patched = True  # type: ignore[attr-defined]
+            setattr(module, name, wrapper)
+
+        patch_callable(datasets, "load_dataset", ("path", "path_or_name"))
+        patch_callable(datasets, "load_dataset_builder", ("path", "path_or_name"))
+        patch_callable(datasets, "get_dataset_config_names", ("path", "path_or_name"))
+        patch_callable(datasets_load, "load_dataset", ("path", "path_or_name"))
+        patch_callable(datasets_load, "load_dataset_builder", ("path", "path_or_name"))
+        patch_callable(datasets_load, "get_dataset_config_names", ("path", "path_or_name"))
+        patch_callable(datasets_load, "dataset_module_factory", ("path", "path_or_name"))
+
     def _patch_transformers_for_lm_eval(self):
         import transformers
 
@@ -90,6 +140,7 @@ class LMEvalHarnessRunner:
 
     def evaluate_model(self, model_name: str, model_path: str) -> dict:
         try:
+            self._patch_datasets_repo_aliases()
             self._patch_transformers_for_lm_eval()
             from lm_eval import evaluator
         except ImportError as exc:
