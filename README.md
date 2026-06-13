@@ -7,9 +7,19 @@ Design choices:
 
 - Keep the block-wise codebook/scaling backbone from `NCCQuant`.
 - Support both plain nearest-codeword quantization (`RTN`) and `RBVT`.
-- Use one unified entrypoint for quantization, perplexity evaluation, and `lm-eval`.
+- Use one unified entrypoint for float evaluation, quantization, perplexity evaluation, and `lm-eval`.
 
-Main entrypoint:
+Run float baseline only:
+
+```bash
+cd RBVTQuant
+python main.py \
+  --model-path <hf-model-or-local-path> \
+  --method float \
+  --output-dir ./float_eval
+```
+
+Run RBVT quantization:
 
 ```bash
 cd RBVTQuant
@@ -36,6 +46,8 @@ Runtime notes:
 - `HF_TOKEN` and `WANDB_API_KEY` are loaded from `RBVTQuant/.env`.
 - `lm-eval` uses the same task presets as the reference source. The default preset is `extended`:
   `arc_easy`, `arc_challenge`, `hellaswag`, `piqa`, `winogrande`, `boolq`, `rte`, `openbookqa`, `lambada_openai`.
+- Batch scripts are split by run type:
+  `bash bash/run_float.sh`, `bash bash/run_rtn.sh`, `bash bash/run_rbvt.sh`.
 - For a fast harness sanity check, run:
   `bash bash/test_lm_eval.sh`
 - `wandb` logging is opt-in with `--use-wandb`.

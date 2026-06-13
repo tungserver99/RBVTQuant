@@ -77,40 +77,53 @@ def build_run_name(args) -> str:
     return "_".join(parts)
 
 
-def collect_wandb_metrics(results: dict) -> dict[str, float]:
+def build_variant_run_name(args, variant: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    variant_slug = variant.lower()
+    parts = [variant_slug, build_model_slug(args.model_path)]
+    if variant_slug != "float":
+        parts.append(args.quantizer)
+    parts.extend([f"s{args.seed}", timestamp])
+    return "_".join(parts)
+
+
+def collect_wandb_metrics(perplexity_results: dict, lm_eval_payload: dict | None) -> dict[str, float]:
     flat: dict[str, float] = {}
 
-    perplexity_results = results.get("perplexity", {})
-    for model_name, dataset_payload in perplexity_results.items():
-        if not isinstance(dataset_payload, dict):
+    for dataset_name, metrics in perplexity_results.items():
+        if not isinstance(metrics, dict):
             continue
-        for dataset_name, metrics in dataset_payload.items():
-            if not isinstance(metrics, dict):
-                continue
-            perplexity = metrics.get("perplexity")
-            if isinstance(perplexity, (int, float)) and not isinstance(perplexity, bool):
-                flat[f"perplexity/{model_name}/{dataset_name}"] = perplexity
+        perplexity = metrics.get("perplexity")
+        if isinstance(perplexity, (int, float)) and not isinstance(perplexity, bool):
+            flat[f"perplexity/{dataset_name}"] = perplexity
 
-    lm_eval_results = results.get("lm_eval", {})
-    for model_name, payload in lm_eval_results.items():
-        if not isinstance(payload, dict):
+    if not isinstance(lm_eval_payload, dict):
+        return flat
+
+    summary = lm_eval_payload.get("summary")
+    raw_results = lm_eval_payload.get("raw", {}).get("results")
+    task_results = summary if isinstance(summary, dict) else raw_results if isinstance(raw_results, dict) else None
+    if not isinstance(task_results, dict):
+        return flat
+
+    for task_name, metrics in task_results.items():
+        if not isinstance(metrics, dict):
             continue
-        summary = payload.get("summary")
-        raw_results = payload.get("raw", {}).get("results")
-        task_results = summary if isinstance(summary, dict) else raw_results if isinstance(raw_results, dict) else None
-        if not isinstance(task_results, dict):
-            continue
-        for task_name, metrics in task_results.items():
-            if not isinstance(metrics, dict):
-                continue
-            accuracy = metrics.get("acc,none")
-            if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool):
-                flat[f"lm_eval/{model_name}/{task_name}"] = accuracy
+        accuracy = metrics.get("acc,none")
+        if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool):
+            flat[f"lm_eval/{task_name}"] = accuracy
 
     return flat
 
 
-def log_results_to_wandb(args, run_name: str, results: dict):
+def log_results_to_wandb(
+    args,
+    variant: str,
+    run_name: str,
+    perplexity_results: dict,
+    lm_eval_payload: dict | None,
+    output_dir: str,
+):
     try:
         import wandb
     except ImportError:
@@ -125,20 +138,28 @@ def log_results_to_wandb(args, run_name: str, results: dict):
         project=args.wandb_project,
         entity=args.wandb_entity,
         name=run_name,
-        job_type=args.method,
-        tags=[f"method:{args.method}", f"quantizer:{args.quantizer}", f"model:{build_model_slug(args.model_path)}"],
-        config=vars(args),
+        job_type=variant.lower(),
+        tags=[
+            f"variant:{variant.lower()}",
+            f"model:{build_model_slug(args.model_path)}",
+            *( [f"quantizer:{args.quantizer}"] if variant.lower() != "float" else [] ),
+        ],
+        config={**vars(args), "wandb_variant": variant.lower()},
         reinit=True,
     )
     if run is None:
         return
 
-    flat_metrics = collect_wandb_metrics(results)
+    flat_metrics = collect_wandb_metrics(perplexity_results, lm_eval_payload)
     if flat_metrics:
         wandb.log(flat_metrics)
 
+    wandb.summary["variant"] = variant.lower()
     wandb.summary["source_model"] = args.model_path
-    wandb.summary["output_dir"] = args.output_dir
+    wandb.summary["output_dir"] = output_dir
+    if variant.lower() != "float":
+        wandb.summary["method"] = args.method
+        wandb.summary["quantizer"] = args.quantizer
     wandb.summary["lm_eval_tasks"] = list(args.lm_eval_tasks) if args.include_lm_eval else []
     wandb.finish()
 
@@ -440,11 +461,67 @@ def run_lm_eval(args, model_paths: dict[str, str], hf_token: str | None, run_nam
     return runner.run(model_paths)
 
 
+def run_float_only(args, hf_token: str | None):
+    run_name = build_variant_run_name(args, "FLOAT")
+    float_results = evaluate_quantized_model(
+        model_path=args.model_path,
+        model_name="FLOAT",
+        eval_device=args.device,
+        eval_seed=args.seed,
+        eval_stride=args.eval_stride,
+        eval_max_length=args.eval_max_length,
+        eval_cache_dir=args.eval_cache_dir,
+        eval_samples=args.eval_samples,
+        hf_token=hf_token,
+    )
+    float_lm_eval_results = (
+        run_lm_eval(args, {"FLOAT": args.model_path}, hf_token=hf_token, run_name=run_name)
+        if args.include_lm_eval
+        else {}
+    )
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    run_summary = {
+        "model_path": args.model_path,
+        "output_dir": args.output_dir,
+        "run_name": run_name,
+        "device": args.device,
+        "quantizer": None,
+        "quantization": {
+            "method": "float",
+            "num_linear_layers": None,
+            "skip_lmhead": args.skip_lmhead,
+        },
+        "calibration": None,
+        "evaluation": {
+            "stride": args.eval_stride,
+            "max_length": args.eval_max_length,
+            "samples": args.eval_samples,
+            "cache_dir": args.eval_cache_dir,
+            "float_model": float_results,
+            "quantized_model": {},
+            "lm_eval": float_lm_eval_results,
+        },
+        "args": vars(args),
+    }
+    save_run_summary(args.output_dir, run_summary)
+    if args.use_wandb:
+        log_results_to_wandb(
+            args,
+            variant="FLOAT",
+            run_name=run_name,
+            perplexity_results=float_results,
+            lm_eval_payload=float_lm_eval_results.get("FLOAT"),
+            output_dir=args.model_path,
+        )
+    print("Done.")
+
+
 def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
     p.add_argument("--device", type=str, default="cuda:0", help="Device for model loading/eval, e.g. cuda:0, cuda:1, cpu, or auto")
-    p.add_argument("--method", type=str, default="rbvt", choices=["rtn", "rbvt"], help="Quantization method")
+    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt"], help="Run mode")
     p.add_argument("--quantizer", type=str, default="nf4", choices=["nf3", "nf4", "nvfp4", "codebook3", "codebook4"])
     p.add_argument("--output-dir", type=str, default="./quantized_model")
 
@@ -473,8 +550,6 @@ def build_parser():
     p.add_argument("--eval-max-length", type=int, default=2048)
     p.add_argument("--eval-samples", type=int, default=2000, help="Number of documents/samples for stream datasets")
     p.add_argument("--eval-cache-dir", type=str, default="./dataset_cache")
-    p.add_argument("--eval-float", dest="eval_float", action="store_true", default=False, help="Also compute perplexity for the original float model path before quantization")
-    p.add_argument("--no-eval-float", dest="eval_float", action="store_false")
     p.add_argument("--include-lm-eval", dest="include_lm_eval", action="store_true", default=True)
     p.add_argument("--no-lm-eval", dest="include_lm_eval", action="store_false")
     p.add_argument("--lm-eval-task-preset", choices=sorted(DEFAULT_LM_EVAL_TASKS), default="extended")
@@ -519,26 +594,12 @@ def main():
         f"skip_lmhead={args.skip_lmhead}"
     )
 
-    if args.eval_float:
-        float_results = evaluate_quantized_model(
-            model_path=args.model_path,
-            model_name="FLOAT",
-            eval_device=device,
-            eval_seed=args.seed,
-            eval_stride=args.eval_stride,
-            eval_max_length=args.eval_max_length,
-            eval_cache_dir=args.eval_cache_dir,
-            eval_samples=args.eval_samples,
-            hf_token=hf_token,
-        )
-        float_lm_eval_results = (
-            run_lm_eval(args, {"FLOAT": args.model_path}, hf_token=hf_token, run_name=run_name)
-            if args.include_lm_eval
-            else {}
-        )
-    else:
-        float_results = {}
-        float_lm_eval_results = {}
+    if args.method == "float":
+        run_float_only(args, hf_token=hf_token)
+        return
+
+    float_results = {}
+    float_lm_eval_results = {}
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True, token=hf_token)
     if tokenizer.pad_token is None:
@@ -640,16 +701,22 @@ def main():
     }
     save_run_summary(args.output_dir, run_summary)
     if args.use_wandb:
+        if float_results or float_lm_eval_results:
+            log_results_to_wandb(
+                args,
+                variant="FLOAT",
+                run_name=build_variant_run_name(args, "FLOAT"),
+                perplexity_results=float_results,
+                lm_eval_payload=float_lm_eval_results.get("FLOAT"),
+                output_dir=args.model_path,
+            )
         log_results_to_wandb(
             args,
-            run_name=run_name,
-            results={
-                "perplexity": {
-                    "FLOAT": float_results,
-                    args.method.upper(): quant_results,
-                },
-                "lm_eval": lm_eval_results,
-            },
+            variant=args.method.upper(),
+            run_name=build_variant_run_name(args, args.method.upper()),
+            perplexity_results=quant_results,
+            lm_eval_payload=quant_lm_eval_results.get(args.method.upper()),
+            output_dir=args.output_dir,
         )
     cleanup_output_dir(args.output_dir)
 

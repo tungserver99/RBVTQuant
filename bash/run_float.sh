@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Quantized-only RBVT runs.
-# Float baselines are launched separately via bash/run_float.sh.
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -29,7 +26,6 @@ slugify() {
 
 for model in "${MODELS[@]}"; do
   model_slug="$(slugify "$model")"
-  echo "=== RBVT quantized runs for ${model} ==="
   WANDB_ARGS=()
   if [ "$USE_WANDB" = "1" ]; then
     WANDB_ARGS+=(--use-wandb --wandb-project "$WANDB_PROJECT")
@@ -40,29 +36,9 @@ for model in "${MODELS[@]}"; do
 
   python main.py \
     --model-path "$model" \
-    --device cuda:1 \
-    --method rbvt \
-    --quantizer nf4 \
-    --output-dir "./outputs/${model_slug}_rbvt_nf4" \
-    --rbvt-lambda 1.0 \
-    --rbvt-topk 0 \
-    --calib-dataset c4 \
-    --max-length 2048 \
-    --eval-max-length 2048 \
-    --include-lm-eval \
-    --lm-eval-task-preset extended \
-    "${WANDB_ARGS[@]}"
-
-  python main.py \
-    --model-path "$model" \
-    --device cuda:1 \
-    --method rbvt \
-    --quantizer nf3 \
-    --output-dir "./outputs/${model_slug}_rbvt_nf3" \
-    --rbvt-lambda 1.0 \
-    --rbvt-topk 0 \
-    --calib-dataset c4 \
-    --max-length 2048 \
+    --device cuda:0 \
+    --method float \
+    --output-dir "./outputs/${model_slug}_float" \
     --eval-max-length 2048 \
     --include-lm-eval \
     --lm-eval-task-preset extended \

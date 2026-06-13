@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Quantized-only RTN runs.
+# Float baselines are launched separately via bash/run_float.sh.
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -12,7 +15,8 @@ MODELS=(
   "meta-llama/Llama-3.1-8B"
   "mistralai/Mistral-7B-v0.3"
   "meta-llama/Meta-Llama-3-8B"
-  "Qwen/Qwen3-8B"
+  "Qwen/Qwen2.5-7B"
+  "Qwen/Qwen2.5-14B"
 )
 
 slugify() {
@@ -25,6 +29,7 @@ slugify() {
 
 for model in "${MODELS[@]}"; do
   model_slug="$(slugify "$model")"
+  echo "=== RTN quantized runs for ${model} ==="
   WANDB_ARGS=()
   if [ "$USE_WANDB" = "1" ]; then
     WANDB_ARGS+=(--use-wandb --wandb-project "$WANDB_PROJECT")
@@ -39,7 +44,6 @@ for model in "${MODELS[@]}"; do
     --method rtn \
     --quantizer nf4 \
     --output-dir "./outputs/${model_slug}_rtn_nf4" \
-    --eval-float \
     --calib-dataset c4 \
     --max-length 2048 \
     --eval-max-length 2048 \
