@@ -7,6 +7,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = ROOT / ".env"
+LM_EVAL_PREFERRED_METRICS = (
+    "acc,none",
+    "acc_norm,none",
+    "exact_match,strict-match",
+    "exact_match,flexible-extract",
+    "exact_match,none",
+    "exact_match",
+)
+LM_EVAL_WANDB_CANONICAL_METRICS = {
+    "mmlu": (
+        ("lm_eval/mmlu", ("acc,none", "acc")),
+    ),
+    "gsm8k": (
+        ("lm_eval/gsm8k_strict", ("exact_match,strict-match",)),
+        ("lm_eval/gsm8k_flexible", ("exact_match,flexible-extract",)),
+    ),
+}
 
 DEFAULT_LM_EVAL_TASKS = {
     "smoke": [
@@ -78,3 +95,60 @@ def build_model_slug(model_ref: str) -> str:
     candidate = re.sub(r"\d+\.\d+", replace_numeric_dot, candidate)
     candidate = candidate.replace(" ", "_").replace("/", "_").replace("\\", "_")
     return candidate
+
+
+def is_numeric_metric_value(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def pick_lm_eval_metric(task_metrics: dict) -> tuple[str | None, float | None]:
+    if not isinstance(task_metrics, dict):
+        return None, None
+
+    for metric_name in LM_EVAL_PREFERRED_METRICS:
+        value = task_metrics.get(metric_name)
+        if is_numeric_metric_value(value):
+            return metric_name, float(value)
+
+    for metric_name, value in task_metrics.items():
+        if metric_name.endswith("_stderr") or metric_name == "alias":
+            continue
+        if is_numeric_metric_value(value):
+            return metric_name, float(value)
+
+    return None, None
+
+
+def collect_lm_eval_wandb_metrics(task_results: dict) -> dict[str, float]:
+    if not isinstance(task_results, dict):
+        return {}
+
+    metrics = {}
+    for task_name, task_metrics in task_results.items():
+        if not isinstance(task_metrics, dict):
+            continue
+        if task_name != "mmlu" and task_name.startswith("mmlu"):
+            continue
+        if task_name != "gsm8k" and task_name.startswith("gsm8k"):
+            continue
+        if task_name == "gsm8k":
+            continue
+
+        accuracy = task_metrics.get("acc,none")
+        if is_numeric_metric_value(accuracy):
+            metrics[f"lm_eval/{task_name}"] = float(accuracy)
+
+    for task_name, metric_specs in LM_EVAL_WANDB_CANONICAL_METRICS.items():
+        task_metrics = task_results.get(task_name, {})
+        if not isinstance(task_metrics, dict):
+            continue
+        for wandb_key, metric_names in metric_specs:
+            for metric_name in metric_names:
+                value = task_metrics.get(metric_name)
+                if is_numeric_metric_value(value):
+                    metrics[wandb_key] = float(value)
+                    break
+            if wandb_key in metrics:
+                continue
+
+    return metrics

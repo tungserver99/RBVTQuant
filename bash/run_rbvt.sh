@@ -10,13 +10,27 @@ cd "$ROOT_DIR"
 USE_WANDB="${USE_WANDB:-1}"
 WANDB_PROJECT="${WANDB_PROJECT:-rbvtquant}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"
+RBVT_DEVICE="${RBVT_DEVICE:-cuda:1}"
 
 MODELS=(
   "meta-llama/Llama-3.1-8B"
   "mistralai/Mistral-7B-v0.3"
-  "meta-llama/Meta-Llama-3-8B"
   "Qwen/Qwen2.5-7B"
-  "Qwen/Qwen2.5-14B"
+  # "Qwen/Qwen2.5-14B"
+)
+
+LM_EVAL_TASKS=(
+  "arc_easy"
+  "arc_challenge"
+  "hellaswag"
+  "piqa"
+  "winogrande"
+  "boolq"
+  "rte"
+  "openbookqa"
+  "lambada_openai"
+  "mmlu"
+  "gsm8k"
 )
 
 slugify() {
@@ -40,7 +54,7 @@ for model in "${MODELS[@]}"; do
 
   python main.py \
     --model-path "$model" \
-    --device cuda:1 \
+    --device "$RBVT_DEVICE" \
     --method rbvt \
     --quantizer nf4 \
     --output-dir "./outputs/${model_slug}_rbvt_nf4" \
@@ -50,12 +64,12 @@ for model in "${MODELS[@]}"; do
     --max-length 2048 \
     --eval-max-length 2048 \
     --include-lm-eval \
-    --lm-eval-task-preset extended \
+    --lm-eval-tasks "${LM_EVAL_TASKS[@]}" \
     "${WANDB_ARGS[@]}"
 
   python main.py \
     --model-path "$model" \
-    --device cuda:1 \
+    --device "$RBVT_DEVICE" \
     --method rbvt \
     --quantizer nf3 \
     --output-dir "./outputs/${model_slug}_rbvt_nf3" \
@@ -65,6 +79,6 @@ for model in "${MODELS[@]}"; do
     --max-length 2048 \
     --eval-max-length 2048 \
     --include-lm-eval \
-    --lm-eval-task-preset extended \
+    --lm-eval-tasks "${LM_EVAL_TASKS[@]}" \
     "${WANDB_ARGS[@]}"
 done

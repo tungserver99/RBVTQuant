@@ -51,4 +51,4 @@ Runtime notes:
 - For a fast harness sanity check, run:
   `bash bash/test_lm_eval.sh`
 - `wandb` logging is opt-in with `--use-wandb`.
-- Only perplexity and `lm-eval` `acc,none` are logged to `wandb`.
+- Perplexity and selected top-level `lm-eval` metrics are logged to `wandb`; `mmlu` is collapsed to one top-level score and `gsm8k` logs only the strict/flexible exact-match metrics.

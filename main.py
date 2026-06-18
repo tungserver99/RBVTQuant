@@ -34,9 +34,12 @@ import quantizers.base_quantizer as base_q
 from calibration_utils import load_calibration_data
 from eval_perplexity import RBVTSlidingWindowEvaluator
 from lm_eval_runner import LMEvalHarnessRunner
+from nonuniform_gptq import quantize_model_gptq
 from quantizers import apply_rbvt, get_quantizer
 from runtime_utils import (
+    collect_lm_eval_wandb_metrics,
     DEFAULT_LM_EVAL_TASKS,
+    LM_EVAL_WANDB_CANONICAL_METRICS,
     build_model_slug,
     load_runtime_env,
     resolve_hf_token,
@@ -102,17 +105,21 @@ def collect_wandb_metrics(perplexity_results: dict, lm_eval_payload: dict | None
 
     summary = lm_eval_payload.get("summary")
     raw_results = lm_eval_payload.get("raw", {}).get("results")
-    task_results = summary if isinstance(summary, dict) else raw_results if isinstance(raw_results, dict) else None
+    raw_groups = lm_eval_payload.get("raw", {}).get("groups")
+    task_results = {}
+    if isinstance(raw_results, dict):
+        task_results.update(raw_results)
+    if isinstance(summary, dict):
+        task_results.update(summary)
+    if isinstance(raw_groups, dict):
+        for task_name in LM_EVAL_WANDB_CANONICAL_METRICS:
+            group_metrics = raw_groups.get(task_name)
+            if isinstance(group_metrics, dict):
+                task_results[task_name] = group_metrics
     if not isinstance(task_results, dict):
         return flat
 
-    for task_name, metrics in task_results.items():
-        if not isinstance(metrics, dict):
-            continue
-        accuracy = metrics.get("acc,none")
-        if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool):
-            flat[f"lm_eval/{task_name}"] = accuracy
-
+    flat.update(collect_lm_eval_wandb_metrics(task_results))
     return flat
 
 
@@ -521,7 +528,7 @@ def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
     p.add_argument("--device", type=str, default="cuda:0", help="Device for model loading/eval, e.g. cuda:0, cuda:1, cpu, or auto")
-    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt"], help="Run mode")
+    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq"], help="Run mode")
     p.add_argument("--quantizer", type=str, default="nf4", choices=["nf3", "nf4", "nvfp4", "codebook3", "codebook4"])
     p.add_argument("--output-dir", type=str, default="./quantized_model")
 
@@ -545,6 +552,10 @@ def build_parser():
     p.add_argument("--cb-block-size", type=int, default=64)
     p.add_argument("--kmeans-iters", type=int, default=20)
     p.add_argument("--row-chunk", type=int, default=1024)
+    p.add_argument("--gptq-blocksize", type=int, default=128, help="Column block size used by GPTQ")
+    p.add_argument("--gptq-percdamp", type=float, default=0.01, help="Diagonal damping used by GPTQ")
+    p.add_argument("--gptq-act-order", dest="gptq_act_order", action="store_true", default=False, help="Use activation-order column permutation for GPTQ")
+    p.add_argument("--no-gptq-act-order", dest="gptq_act_order", action="store_false")
 
     p.add_argument("--eval-stride", type=int, default=512)
     p.add_argument("--eval-max-length", type=int, default=2048)
@@ -631,22 +642,38 @@ def main():
         seqlen=args.max_length,
         seed=args.seed,
     )
-    model, quant_stats = quantize_model(
-        model=model,
-        tokenizer=tokenizer,
-        quantizer=quantizer,
-        calib_texts=calib_texts,
-        device=device,
-        method=args.method,
-        skip_lmhead=args.skip_lmhead,
-        n_calib=args.n_calib,
-        max_length=args.max_length,
-        row_chunk=args.row_chunk,
-        rbvt_lambda=args.rbvt_lambda,
-        rbvt_topk=args.rbvt_topk,
-        gap_floor=args.gap_floor,
-        strict_descent=args.strict_descent,
-    )
+    if args.method == "gptq":
+        model, quant_stats = quantize_model_gptq(
+            model=model,
+            tokenizer=tokenizer,
+            quantizer=quantizer,
+            calib_texts=calib_texts,
+            device=device,
+            skip_lmhead=args.skip_lmhead,
+            n_calib=args.n_calib,
+            max_length=args.max_length,
+            row_chunk=args.row_chunk,
+            gptq_blocksize=args.gptq_blocksize,
+            gptq_percdamp=args.gptq_percdamp,
+            gptq_act_order=args.gptq_act_order,
+        )
+    else:
+        model, quant_stats = quantize_model(
+            model=model,
+            tokenizer=tokenizer,
+            quantizer=quantizer,
+            calib_texts=calib_texts,
+            device=device,
+            method=args.method,
+            skip_lmhead=args.skip_lmhead,
+            n_calib=args.n_calib,
+            max_length=args.max_length,
+            row_chunk=args.row_chunk,
+            rbvt_lambda=args.rbvt_lambda,
+            rbvt_topk=args.rbvt_topk,
+            gap_floor=args.gap_floor,
+            strict_descent=args.strict_descent,
+        )
 
     os.makedirs(args.output_dir, exist_ok=True)
     print(f"Saving to {args.output_dir} ...")
