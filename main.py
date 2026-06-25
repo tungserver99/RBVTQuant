@@ -3,8 +3,8 @@ Unified entrypoint for RBVTQuant research runs.
 
 Features:
 - one CLI for quantization + perplexity evaluation;
-- supports plain nearest-codeword quantization (RTN) and RBVT refinement;
-- keeps the same non-uniform quantizer backbone for both methods.
+- supports plain nearest-codeword quantization (RTN), RBVT refinement, and GPTQ assignment;
+- keeps the same non-uniform quantizer backbone for all methods.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ from quantizers import apply_rbvt, get_quantizer
 from runtime_utils import (
     collect_lm_eval_wandb_metrics,
     DEFAULT_LM_EVAL_TASKS,
-    LM_EVAL_WANDB_CANONICAL_METRICS,
     build_model_slug,
     load_runtime_env,
     resolve_hf_token,
@@ -109,13 +108,10 @@ def collect_wandb_metrics(perplexity_results: dict, lm_eval_payload: dict | None
     task_results = {}
     if isinstance(raw_results, dict):
         task_results.update(raw_results)
+    if isinstance(raw_groups, dict):
+        task_results.update(raw_groups)
     if isinstance(summary, dict):
         task_results.update(summary)
-    if isinstance(raw_groups, dict):
-        for task_name in LM_EVAL_WANDB_CANONICAL_METRICS:
-            group_metrics = raw_groups.get(task_name)
-            if isinstance(group_metrics, dict):
-                task_results[task_name] = group_metrics
     if not isinstance(task_results, dict):
         return flat
 
@@ -288,6 +284,9 @@ def quantize_model(
     row_chunk: int = 1024,
     rbvt_lambda: float = 1.0,
     rbvt_topk: int = 0,
+    rbvt_budget_p: float = 1.0,
+    rbvt_target_ratio: float = 1.0,
+    rbvt_mse_guard: bool = False,
     gap_floor: float = 1e-8,
     strict_descent: bool = True,
 ):
@@ -339,6 +338,9 @@ def quantize_model(
                 sigma_ii=sigma_ii,
                 rbvt_lambda=rbvt_lambda,
                 rbvt_topk=rbvt_topk if rbvt_topk > 0 else None,
+                rbvt_budget_p=rbvt_budget_p,
+                target_ratio=rbvt_target_ratio,
+                mse_guard=rbvt_mse_guard,
                 row_chunk=row_chunk,
                 gap_floor=gap_floor,
                 strict_descent=strict_descent,
@@ -390,6 +392,9 @@ def quantize_model(
                 "objective_after": total_objective_after,
                 "variance_increase": total_variance_increase,
                 "rbvt_topk": rbvt_topk,
+                "rbvt_budget_p": rbvt_budget_p,
+                "rbvt_target_ratio": rbvt_target_ratio,
+                "rbvt_mse_guard": rbvt_mse_guard,
             }
         )
 
@@ -528,9 +533,11 @@ def build_parser():
     p = argparse.ArgumentParser(description="RBVTQuant main entrypoint: quantize + perplexity eval")
     p.add_argument("--model-path", type=str, required=True, help="HF model name or local path")
     p.add_argument("--device", type=str, default="cuda:0", help="Device for model loading/eval, e.g. cuda:0, cuda:1, cpu, or auto")
-    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq"], help="Run mode")
+    p.add_argument("--method", type=str, default="rbvt", choices=["float", "rtn", "rbvt", "gptq", "gptvq"], help="Run mode")
     p.add_argument("--quantizer", type=str, default="nf4", choices=["nf3", "nf4", "nvfp4", "codebook3", "codebook4"])
     p.add_argument("--output-dir", type=str, default="./quantized_model")
+    p.add_argument("--skip-save-eval", dest="skip_save_eval", action="store_true", default=False,
+                   help="Quantize and write run_summary.json only; skip save_pretrained/evaluation.")
 
     p.add_argument("--skip-lmhead", dest="skip_lmhead", action="store_true", default=True)
     p.add_argument("--no-skip-lmhead", dest="skip_lmhead", action="store_false")
@@ -543,6 +550,12 @@ def build_parser():
     p.add_argument("--no-asym", dest="asym", action="store_false")
     p.add_argument("--rbvt-lambda", type=float, default=1.0, help="Lambda in the RBVT surrogate objective")
     p.add_argument("--rbvt-topk", type=int, default=0, help="Optional per-row candidate prefilter for RBVT; 0 keeps the full candidate set")
+    p.add_argument("--rbvt-budget-p", type=float, default=1.0,
+                   help="NCC-style per-row candidate budget fraction ceil(p*|A_j|); 1.0 keeps all candidates.")
+    p.add_argument("--rbvt-target-ratio", type=float, default=1.0,
+                   help="Solve RBVT toward target_ratio*|bias| instead of full |bias|; 1.0 keeps original RBVT.")
+    p.add_argument("--rbvt-mse-guard", dest="rbvt_mse_guard", action="store_true", default=False,
+                   help="Only admit RBVT flips with gap<2|e|, matching NCC's diagonal MSE guard.")
     p.add_argument("--gap-floor", type=float, default=1e-8, help="Absolute floor on a feasible neighbouring gap")
     p.add_argument("--strict-descent", dest="strict_descent", action="store_true", default=True, help="Enforce sum r_i <= T in projection")
     p.add_argument("--allow-overshoot", dest="strict_descent", action="store_false", help="Use the looser sum r_i <= 2T projection bound")
@@ -550,12 +563,67 @@ def build_parser():
     p.add_argument("--nf-block-size", type=int, default=64)
     p.add_argument("--nvfp4-block-size", type=int, default=16)
     p.add_argument("--cb-block-size", type=int, default=64)
-    p.add_argument("--kmeans-iters", type=int, default=20)
+    p.add_argument("--kmeans-iters", type=int, default=100)
     p.add_argument("--row-chunk", type=int, default=1024)
-    p.add_argument("--gptq-blocksize", type=int, default=128, help="Column block size used by GPTQ")
-    p.add_argument("--gptq-percdamp", type=float, default=0.01, help="Diagonal damping used by GPTQ")
-    p.add_argument("--gptq-act-order", dest="gptq_act_order", action="store_true", default=False, help="Use activation-order column permutation for GPTQ")
+    p.add_argument("--gptq-blocksize", type=int, default=128)
+    p.add_argument("--gptq-percdamp", type=float, default=0.01)
+    p.add_argument("--gptq-act-order", dest="gptq_act_order", action="store_true", default=False)
     p.add_argument("--no-gptq-act-order", dest="gptq_act_order", action="store_false")
+    # --- GPTQ + NCC correction ---
+    p.add_argument("--gptq-ncc", dest="gptq_ncc", action="store_true", default=False,
+                   help="Apply NCC first-moment correction on top of GPTQ assignment.")
+    p.add_argument("--ncc-baseline", choices=["original", "adjusted"], default="original",
+                   help="FP reference NCC corrects against. 'original' = layer "
+                        "weight before GPTQ (true inference target; recommended). "
+                        "'adjusted' = error-feedback-adjusted weight at assignment "
+                        "(restores |e|<=g/2 but undoes GPTQ feedback).")
+    p.add_argument("--ncc-score", choices=["cov", "lite"], default="cov",
+                   help="NCC scoring: cov = |mu|/((sigma_ii+eps)*g) (default); "
+                        "lite = |mu|/g.")
+    p.add_argument("--ncc-budget-p", type=float, default=0.02)
+    p.add_argument("--ncc-cov-eps", type=float, default=1e-6)
+    p.add_argument("--ncc-james-stein", dest="ncc_james_stein", action="store_true", default=False)
+    p.add_argument("--ncc-mse-guard", dest="ncc_mse_guard", action="store_true", default=False,
+                   help="Only admit flips with gap<2|e| (Cor-2 diagonal safety): "
+                        "each flip then reduces both bias and diagonal awMSE. "
+                        "Trades bias-reduction for guaranteed no-awMSE-increase.")
+
+    # --- GPTVQ-1D (method=gptvq): upstream GPTVQ scalar VQ + post correction ---
+    p.add_argument("--gptvq-correction", choices=["none", "ncc", "rbvt"], default="ncc",
+                   help="(method=gptvq) post-GPTVQ correction to apply.")
+    p.add_argument("--wbits", type=int, default=4, choices=[3, 4],
+                   help="(method=gptvq) GPTVQ-1D bit-width.")
+    p.add_argument("--groupsize", type=int, default=128,
+                   help="(method=gptvq) GPTVQ-1D codebook group size.")
+    p.add_argument("--kmeans-init-method", choices=["cdf", "kpp", "mahalanobis"], default="mahalanobis",
+                   help="(method=gptvq) GPTVQ-1D k-means centroid initialisation.")
+    p.add_argument("--assignment-chunk-size", type=int, default=4096,
+                   help="(method=gptvq) GPTVQ-1D assignment chunk size.")
+    p.add_argument("--kpp-n-subsample", type=int, default=10000,
+                   help="(method=gptvq) GPTVQ-1D k-means++ subsample (-1 = all).")
+    p.add_argument("--sym", dest="sym", action="store_true", default=False,
+                   help="(method=gptvq) symmetric GPTVQ-1D scaling.")
+    p.add_argument("--include-m-step", dest="include_m_step", action="store_true", default=True)
+    p.add_argument("--no-include-m-step", dest="include_m_step", action="store_false")
+    p.add_argument("--hessian-weighted-lookups", dest="hessian_weighted_lookups", action="store_true", default=True)
+    p.add_argument("--no-hessian-weighted-lookups", dest="hessian_weighted_lookups", action="store_false")
+    p.add_argument("--true-sequential", dest="true_sequential", action="store_true", default=True)
+    p.add_argument("--no-true-sequential", dest="true_sequential", action="store_false")
+    p.add_argument("--keep-model-on-device", dest="keep_model_on_device", action="store_true", default=False,
+                   help="(method=gptvq) keep the full model on --device during quantization.")
+    # GPTVQ-1D NCC sweep controls (reuses --ncc-budget-p / --ncc-james-stein above)
+    p.add_argument("--ncc-placement", choices=["post_module", "post_block"], default="post_module",
+                   help="(method=gptvq) run NCC after each Linear module or inside GPTVQ after each GPTQ block.")
+    p.add_argument("--ncc-sweeps", type=int, default=1,
+                   help="(method=gptvq) number of iterative NCC correction sweeps per layer.")
+    p.add_argument("--ncc-stop-eps", type=float, default=0.0,
+                   help="(method=gptvq) stop NCC sweeps when bias improvement <= this value.")
+    p.add_argument("--gptvq-diagnostic-layer-limit", dest="diagnostic_layer_limit", type=int, default=0,
+                   help="(method=gptvq) number of early Linear layers for activation-error diagnostics.")
+    p.add_argument("--gptvq-diagnostic-max-tokens", dest="diagnostic_max_tokens", type=int, default=4096,
+                   help="(method=gptvq) max calibration tokens retained per diagnostic layer.")
+    p.add_argument("--gptvq-stop-after-linear-layers", dest="stop_after_linear_layers", type=int, default=0,
+                   help="(method=gptvq) stop quantization after this many Linear modules; 0 runs all.")
 
     p.add_argument("--eval-stride", type=int, default=512)
     p.add_argument("--eval-max-length", type=int, default=2048)
@@ -583,6 +651,10 @@ def main():
         args.lm_eval_tasks = list(DEFAULT_LM_EVAL_TASKS[args.lm_eval_task_preset])
     if args.rbvt_lambda < 0.0:
         raise ValueError("--rbvt-lambda must be non-negative")
+    if not 0.0 <= args.rbvt_budget_p <= 1.0:
+        raise ValueError("--rbvt-budget-p must be in [0, 1]")
+    if not 0.0 <= args.rbvt_target_ratio <= 1.0:
+        raise ValueError("--rbvt-target-ratio must be in [0, 1]")
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -642,8 +714,32 @@ def main():
         seqlen=args.max_length,
         seed=args.seed,
     )
-    if args.method == "gptq":
-        model, quant_stats = quantize_model_gptq(
+    if args.method == "gptvq":
+        # GPTVQ-1D (upstream Qualcomm GPTVQ scalar VQ codebook) plus an optional
+        # post assignment correction. Reuses the verified pipeline from
+        # gptvq_rbvt_benchmark so codebook / QuantResult / correction interfaces
+        # never drift from the debug harness.
+        # Imported lazily: importing the benchmark module sets up sys.path for the
+        # ./GPTVQ checkout and the transformers.Conv1D shim, so it must only run when
+        # this method is actually selected.
+        from gptvq_rbvt_benchmark import quantize_model_gptvq_1d
+
+        # The benchmark pipeline reads args.percdamp (main.py exposes --gptq-percdamp).
+        if not hasattr(args, "percdamp"):
+            args.percdamp = args.gptq_percdamp
+        # The benchmark NCC sweeps read args.ncc_use_james_stein; main.py stores the
+        # same flag under args.ncc_james_stein (--ncc-james-stein).
+        args.ncc_use_james_stein = args.ncc_james_stein
+        gptvq_stats = quantize_model_gptvq_1d(
+            model=model,
+            tokenizer=tokenizer,
+            calib_texts=calib_texts,
+            args=args,
+            correction=None if args.gptvq_correction == "none" else args.gptvq_correction,
+        )
+        quant_stats = gptvq_stats
+    elif args.method == "gptq":
+        model, gptq_stats = quantize_model_gptq(
             model=model,
             tokenizer=tokenizer,
             quantizer=quantizer,
@@ -656,7 +752,15 @@ def main():
             gptq_blocksize=args.gptq_blocksize,
             gptq_percdamp=args.gptq_percdamp,
             gptq_act_order=args.gptq_act_order,
+            use_ncc=args.gptq_ncc,
+            ncc_baseline=args.ncc_baseline,
+            ncc_score=args.ncc_score,
+            ncc_budget_p=args.ncc_budget_p,
+            ncc_cov_eps=args.ncc_cov_eps,
+            ncc_use_james_stein=args.ncc_james_stein,
+            ncc_mse_guard=args.ncc_mse_guard,
         )
+        quant_stats = vars(gptq_stats)
     else:
         model, quant_stats = quantize_model(
             model=model,
@@ -671,11 +775,38 @@ def main():
             row_chunk=args.row_chunk,
             rbvt_lambda=args.rbvt_lambda,
             rbvt_topk=args.rbvt_topk,
+            rbvt_budget_p=args.rbvt_budget_p,
+            rbvt_target_ratio=args.rbvt_target_ratio,
+            rbvt_mse_guard=args.rbvt_mse_guard,
             gap_floor=args.gap_floor,
             strict_descent=args.strict_descent,
         )
 
     os.makedirs(args.output_dir, exist_ok=True)
+    if args.skip_save_eval:
+        run_summary = {
+            "model_path": args.model_path,
+            "output_dir": args.output_dir,
+            "run_name": run_name,
+            "device": args.device,
+            "quantizer": args.quantizer,
+            "quantization": quant_stats,
+            "calibration": {
+                "dataset": args.calib_dataset,
+                "n_calib": args.n_calib,
+                "max_length": args.max_length,
+                "seed": args.seed,
+            },
+            "evaluation": {
+                "skipped": True,
+                "reason": "--skip-save-eval",
+            },
+            "args": vars(args),
+        }
+        save_run_summary(args.output_dir, run_summary)
+        print("Skipping save_pretrained and evaluation (--skip-save-eval).")
+        return
+
     print(f"Saving to {args.output_dir} ...")
     model.save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
